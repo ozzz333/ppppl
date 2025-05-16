@@ -1,37 +1,4 @@
-  // Auto-update countdowns
-  const [, setCountdownTick] = useState(0);
-  
-  useEffect(() => {
-    // Update countdowns every minute
-    const interval = setInterval(() => {
-      setCountdownTick(prev => prev + 1);
-    }, 60000);
-    
-    return () => clearInterval(interval);
-  }, []);  // Calculate bet expiry time based on timeframe
-  const calculateExpiryTime = (startTime, timeframeStr) => {
-    const timeframeHours = TIMEFRAMES[timeframeStr];
-    return new Date(startTime.getTime() + timeframeHours * 60 * 60 * 1000);
-  };
-  
-  // Format countdown display
-  const formatCountdown = (expiryTime) => {
-    const now = new Date();
-    if (now >= expiryTime) return "Expired";
-    
-    const diffMs = expiryTime - now;
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-    const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-    
-    if (diffDays > 0) {
-      return `${diffDays}d ${diffHours}h remaining`;
-    } else if (diffHours > 0) {
-      return `${diffHours}h ${diffMinutes}m remaining`;
-    } else {
-      return `${diffMinutes}m remaining`;
-    }
-  };      {/* Login Modal */}
+      {/* Login Modal */}
       <LoginModal
         isOpen={showLoginModal}
         onClose={() => setShowLoginModal(false)}
@@ -540,109 +507,26 @@ export default function ParlayBuilder() {
     loadSavedData();
   }, []);
 
-  // Fetch live price for selected asset with retry and cache
+  // Fetch live price for selected asset
   useEffect(() => {
-    const CACHE_DURATION = 60000; // 1 minute cache
-    const MAX_RETRIES = 3;
-    
-    // Check if we have cached data
-    const cachedData = localStorage.getItem(`priceCache_${selectedAsset}`);
-    if (cachedData) {
-      try {
-        const { price, timestamp } = JSON.parse(cachedData);
-        // Use cache if it's fresh
-        if (Date.now() - timestamp < CACHE_DURATION) {
-          console.log(`Using cached price for ${selectedAsset}:`, price);
-          setLivePrice(price);
-        }
-      } catch (err) {
-        console.error("Error parsing cached price data:", err);
-      }
-    }
-    
-    // Function to fetch with retries
-    async function fetchPriceWithRetry(retriesLeft = MAX_RETRIES) {
+    async function fetchPrice() {
       try {
         const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ASSETS[selectedAsset].symbol}&vs_currencies=usd`);
-        if (!res.ok) throw new Error(`Status ${res.status}`);
-        
         const data = await res.json();
-        const price = data[ASSETS[selectedAsset].symbol].usd;
-        
-        // Cache the result
-        localStorage.setItem(`priceCache_${selectedAsset}`, JSON.stringify({
-          price,
-          timestamp: Date.now()
-        }));
-        
-        setLivePrice(price);
-        return price;
+        setLivePrice(data[ASSETS[selectedAsset].symbol].usd);
       } catch (err) {
-        console.error(`Error fetching price (retries left: ${retriesLeft}):`, err);
-        
-        if (retriesLeft > 0) {
-          // Wait before retrying (exponential backoff)
-          const delay = (MAX_RETRIES - retriesLeft + 1) * 1000;
-          console.log(`Retrying in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return fetchPriceWithRetry(retriesLeft - 1);
-        }
-        
-        // All retries failed - use fallback price from our hardcoded data
-        // This ensures users can still add to parlay even if API is down
-        const fallbackPrice = getFallbackPrice(selectedAsset);
-        console.log(`Using fallback price for ${selectedAsset}:`, fallbackPrice);
-        setLivePrice(fallbackPrice);
-        return fallbackPrice;
+        console.error("Error fetching live price", err);
+        setLivePrice(0);
       }
     }
-    
-    // Fallback price function using market caps and estimates
-    function getFallbackPrice(asset) {
-      const baseValues = {
-        BTC: 46000,
-        ETH: 2500,
-        SOL: 105,
-        LINK: 15,
-        DOGE: 0.12
-      };
-      
-      // Add some random variation to make it look more realistic
-      const variation = 0.05; // 5% variation
-      const randomFactor = 1 + (Math.random() * variation * 2 - variation);
-      
-      return baseValues[asset] * randomFactor;
-    }
-    
-    fetchPriceWithRetry();
+    fetchPrice();
   }, [selectedAsset]);
 
-  // Fetch volatility data for selected asset with retry and cache
+  // Fetch volatility data for selected asset
   useEffect(() => {
-    const CACHE_DURATION = 3600000; // 1 hour cache for volatility
-    const MAX_RETRIES = 2;
-    
-    // Check if we have cached data
-    const cachedData = localStorage.getItem(`volatilityCache_${selectedAsset}`);
-    if (cachedData) {
-      try {
-        const { volatility, timestamp } = JSON.parse(cachedData);
-        // Use cache if it's fresh
-        if (Date.now() - timestamp < CACHE_DURATION) {
-          console.log(`Using cached volatility for ${selectedAsset}:`, volatility);
-          setLiveVolatility(volatility);
-        }
-      } catch (err) {
-        console.error("Error parsing cached volatility data:", err);
-      }
-    }
-    
-    // Function to fetch with retries
-    async function fetchVolatilityWithRetry(retriesLeft = MAX_RETRIES) {
+    async function fetchVolatility() {
       try {
         const res = await fetch(`https://api.coingecko.com/api/v3/coins/${ASSETS[selectedAsset].symbol}/market_chart?vs_currency=usd&days=90&interval=daily`);
-        if (!res.ok) throw new Error(`Status ${res.status}`);
-        
         const data = await res.json();
         const prices = data.prices.map(p => p[1]);
         const returns = prices.slice(1).map((price, i) => Math.log(price / prices[i]));
@@ -653,36 +537,14 @@ export default function ParlayBuilder() {
           return count + (change >= 0.10 ? 1 : 0);
         }, 0);
         const tailFactor = 1 + Math.min(outlierCount / 90, 0.25);
-        const volatility = Math.sqrt(variance) * tailFactor;
-        
-        // Cache the result
-        localStorage.setItem(`volatilityCache_${selectedAsset}`, JSON.stringify({
-          volatility,
-          timestamp: Date.now()
-        }));
-        
-        setLiveVolatility(volatility);
-        return volatility;
+        const dailyVolatility = Math.sqrt(variance) * tailFactor;
+        setLiveVolatility(dailyVolatility);
       } catch (err) {
-        console.error(`Error fetching volatility (retries left: ${retriesLeft}):`, err);
-        
-        if (retriesLeft > 0) {
-          // Wait before retrying
-          const delay = (MAX_RETRIES - retriesLeft + 1) * 1000;
-          console.log(`Retrying in ${delay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return fetchVolatilityWithRetry(retriesLeft - 1);
-        }
-        
-        // All retries failed - use fallback volatility from our assets data
-        const fallbackVolatility = ASSETS[selectedAsset].volatility;
-        console.log(`Using fallback volatility for ${selectedAsset}:`, fallbackVolatility);
-        setLiveVolatility(fallbackVolatility);
-        return fallbackVolatility;
+        console.error("Error fetching volatility", err);
+        setLiveVolatility(null);
       }
     }
-    
-    fetchVolatilityWithRetry();
+    fetchVolatility();
   }, [selectedAsset]);
 
   const calculateProbability = (price, lower, upper, volatility, timeframe, marketCapTier) => {
@@ -890,17 +752,15 @@ export default function ParlayBuilder() {
       }
 
       // Whether confirmed or not, add to history 
-      // All transactions considered confirmed
-      setTransactionStatus(`Transaction confirmed! Signature: ${signature}`);
+      const confirmationStatus = confirmed ? 'confirmed' : 'pending';
+      setTransactionStatus(`Transaction ${confirmationStatus}! Signature: ${signature}`);
       
       const ticket = {
         legs,
         betAmount,
         timestamp: new Date().toISOString(),
         signature,
-        status: 'confirmed',
-        odds: parlayOdds,
-        totalPayout: totalPayout,
+        status: confirmationStatus,
         explorerUrl: `https://explorer.solana.com/tx/${signature}`
       };
       
@@ -1097,8 +957,6 @@ export default function ParlayBuilder() {
         timestamp: new Date().toISOString(),
         signature: fakeSignature,
         status: 'simulated',
-        odds: parlayOdds,
-        totalPayout: totalPayout,
         offline: true
       };
       
@@ -1262,6 +1120,7 @@ export default function ParlayBuilder() {
                           <span>
                             {leg.asset} | {leg.timeframe} | ${leg.lowerBound} - ${leg.upperBound} <span className={`ml-2 font-semibold ${((leg.lowerBound + leg.upperBound) / 2) > livePrice ? 'text-green-600' : 'text-red-600'}`}>{((leg.lowerBound + leg.upperBound) / 2) > livePrice ? '↑' : '↓'}</span>
                           </span>
+                          <span className="ml-4 text-sm text-gray-500">{legOdds}x</span>
                           <Button className="ml-2 px-2 py-1 text-xs" onClick={() => setLegs(legs.filter(l => l.id !== leg.id))}>Remove</Button>
                         </li>
                       );
@@ -1279,20 +1138,13 @@ export default function ParlayBuilder() {
                       type="number" 
                       placeholder="Bet Amount (SOL)" 
                       value={betAmount} 
-                      onChange={e => {
-                        const value = parseFloat(e.target.value);
-                        if (isNaN(value) || value < 0) {
-                          setBetAmount(0);
-                        } else {
-                          setBetAmount(value);
-                        }
-                      }} 
+                      onChange={e => setBetAmount(parseFloat(e.target.value))} 
                       className="border p-1 rounded w-32" 
                     />
                     <Button 
                       onClick={placeBet}
-                      disabled={isTransacting || legs.length === 0 || livePrice === 0}
-                      className={`${isTransacting || legs.length === 0 || livePrice === 0 ? "opacity-50 cursor-not-allowed" : ""}`}
+                      disabled={isTransacting || legs.length === 0}
+                      className={isTransacting ? "opacity-50 cursor-not-allowed" : ""}
                     >
                       {isTransacting ? "Processing..." : 
                        diagnosticInfo.offlineMode ? "Simulate Bet (Offline)" : "Place Bet On-Chain"}

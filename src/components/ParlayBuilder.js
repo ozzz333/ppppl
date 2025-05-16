@@ -28,31 +28,27 @@ export default function ParlayBuilder() {
   const [liveVolatility, setLiveVolatility] = useState(null);
   const [isTransacting, setIsTransacting] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState(null);
-  const [network, setNetwork] = useState("devnet"); // "mainnet-beta" or "devnet"
+  const [currentRpcIndex, setCurrentRpcIndex] = useState(0);
 
   // Treasury wallet address where bets will be sent
   const TREASURY_WALLET = "YOUR_TREASURY_WALLET_ADDRESS"; // Replace with your actual treasury wallet address
 
   // RPC Endpoints - using multiple options for reliability
-  const RPC_ENDPOINTS = {
-    "mainnet-beta": [
-      "https://api.mainnet-beta.solana.com",
-      "https://solana-mainnet.g.alchemy.com/v2/demo", // Alchemy demo endpoint
-      "https://solana-api.projectserum.com"
-    ],
-    "devnet": [
-      "https://api.devnet.solana.com",
-      "https://rpc.ankr.com/solana_devnet"
-    ]
-  };
+  const RPC_ENDPOINTS = [
+    "https://solana-mainnet.g.alchemy.com/v2/demo", // Alchemy demo endpoint
+    "https://solana-api.projectserum.com",
+    "https://mainnet.helius-rpc.com/?api-key=15319103-2ae4-4a6e-9d78-eeeef3d6e158", // Helius public endpoint
+    "https://api.mainnet-beta.solana.com"
+  ];
 
-  // Select an RPC endpoint - we'll use the first one from our list
+  // Select an RPC endpoint - we'll use the current index from our list
   const rpcEndpoint = useMemo(() => {
-    return RPC_ENDPOINTS[network][0];
-  }, [network]);
+    return RPC_ENDPOINTS[currentRpcIndex];
+  }, [currentRpcIndex]);
 
   // Create a Solana connection with commitment level
   const connection = useMemo(() => {
+    console.log("Creating connection to:", rpcEndpoint);
     try {
       return new web3.Connection(rpcEndpoint, {
         commitment: 'confirmed',
@@ -124,21 +120,33 @@ export default function ParlayBuilder() {
     }
 
     try {
+      // Clear any previous errors
+      setError("");
+      
+      console.log("Attempting to connect wallet...");
       const response = await window.solana.connect();
       const address = response.publicKey.toString();
       setWalletAddress(address);
+      console.log("Wallet connected:", address);
       
-      try {
-        if (connection) {
-          const balance = await connection.getBalance(response.publicKey);
-          setWalletBalance((balance / 1e9).toFixed(2));
-        } else {
-          setError("Failed to connect to Solana network. Please try again.");
+      // Wait a moment before trying to get balance to ensure connection is established
+      setTimeout(async () => {
+        try {
+          if (connection) {
+            console.log("Getting balance for address:", address);
+            const publicKey = new web3.PublicKey(address);
+            const balance = await connection.getBalance(publicKey);
+            console.log("Balance received:", balance);
+            setWalletBalance((balance / 1e9).toFixed(2));
+          } else {
+            console.error("No connection available");
+            setError("Failed to connect to Solana network. Please try again.");
+          }
+        } catch (balanceErr) {
+          console.error("Failed to get balance:", balanceErr);
+          // Don't set error message here to prevent continuous errors
         }
-      } catch (err) {
-        console.error("Failed to get balance:", err);
-        setError("Failed to get wallet balance. Please try again.");
-      }
+      }, 1000);
     } catch (error) {
       console.error("User denied wallet connection", error);
       setError("Wallet connection was denied.");
@@ -147,14 +155,15 @@ export default function ParlayBuilder() {
 
   // Try to connect to a different RPC endpoint if the current one fails
   const tryAlternativeRpcEndpoint = async () => {
-    // Get the current index of the endpoint
-    const currentIndex = RPC_ENDPOINTS[network].indexOf(rpcEndpoint);
-    // Try the next endpoint in the list, or go back to the first one if we're at the end
-    const nextIndex = (currentIndex + 1) % RPC_ENDPOINTS[network].length;
-    const newEndpoint = RPC_ENDPOINTS[network][nextIndex];
+    // Move to the next endpoint in the list, or go back to the first one if we're at the end
+    const nextIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
+    const newEndpoint = RPC_ENDPOINTS[nextIndex];
     
     // Create a new connection with the alternative endpoint
     try {
+      console.log(`Switching from RPC ${currentRpcIndex} to ${nextIndex}: ${newEndpoint}`);
+      setTransactionStatus(`Switching to alternative RPC endpoint (${nextIndex + 1}/${RPC_ENDPOINTS.length})...`);
+      
       const newConnection = new web3.Connection(newEndpoint, {
         commitment: 'confirmed',
         confirmTransactionInitialTimeout: 60000
@@ -164,39 +173,52 @@ export default function ParlayBuilder() {
       await newConnection.getRecentBlockhash();
       
       // If successful, update the state
-      setTransactionStatus(`Switching to alternative RPC endpoint: ${newEndpoint}`);
+      setCurrentRpcIndex(nextIndex);
       return newConnection;
     } catch (err) {
-      console.error("Alternative RPC endpoint also failed:", err);
-      // If all endpoints fail, try switching networks
-      if (network === "mainnet-beta") {
-        setNetwork("devnet");
-        setTransactionStatus("Mainnet RPC endpoints unavailable. Switched to devnet for testing.");
-      } else {
-        setNetwork("mainnet-beta");
-        setTransactionStatus("Devnet RPC endpoints unavailable. Switched to mainnet.");
+      console.error(`Alternative RPC endpoint ${nextIndex} also failed:`, err);
+      
+      // If we've tried all endpoints and come back to the original one, give up
+      if ((nextIndex + 1) % RPC_ENDPOINTS.length === currentRpcIndex) {
+        console.error("All RPC endpoints failed");
+        return null;
       }
-      return null;
+      
+      // Otherwise recursively try the next one
+      return tryAlternativeRpcEndpoint();
     }
   };
 
   // Auto-connect to wallet if already authorized
   useEffect(() => {
     if (window.solana && window.solana.isPhantom && connection) {
+      console.log("Attempting auto-connect...");
       window.solana.connect({ onlyIfTrusted: true })
         .then(async (res) => {
           const address = res.publicKey.toString();
           setWalletAddress(address);
-          try {
-            const balance = await connection.getBalance(res.publicKey);
-            setWalletBalance((balance / 1e9).toFixed(2));
-          } catch (err) {
-            console.error("Failed to get balance:", err);
-          }
+          console.log("Auto-connected to wallet:", address);
+          setTimeout(async () => {
+            try {
+              console.log("Getting balance for auto-connected wallet");
+              const publicKey = new web3.PublicKey(address);
+              const balance = await connection.getBalance(publicKey);
+              console.log("Balance received:", balance);
+              setWalletBalance((balance / 1e9).toFixed(2));
+            } catch (err) {
+              console.error("Failed to get balance for auto-connected wallet:", err);
+            }
+          }, 1000);
         })
-        .catch(() => {
+        .catch((err) => {
           // Silent fail if not previously trusted
+          console.log("Auto-connect failed (expected if not previously authorized):", err);
         });
+    } else {
+      console.log("Auto-connect prerequisites not met:", {
+        hasPhantom: Boolean(window.solana && window.solana.isPhantom),
+        hasConnection: Boolean(connection)
+      });
     }
   }, [connection]);
 
@@ -306,6 +328,7 @@ export default function ParlayBuilder() {
 
   // Function to create and send a Solana transaction
   const sendBetTransaction = async () => {
+    console.log("Starting sendBetTransaction...");
     if (!window.solana || !window.solana.isPhantom) {
       setError("Phantom wallet not connected");
       return false;
@@ -331,19 +354,28 @@ export default function ParlayBuilder() {
       setTransactionStatus("Preparing transaction...");
       setError(""); // Clear any previous errors
 
-      // Get user public key
+      // Get user public key from Phantom
+      console.log("Getting public key from phantom...");
       const fromPubkey = window.solana.publicKey;
+      console.log("Got public key:", fromPubkey.toString());
       
       // Parse treasury wallet address
+      console.log("Using treasury wallet:", TREASURY_WALLET);
+      
+      if (TREASURY_WALLET === "YOUR_TREASURY_WALLET_ADDRESS") {
+        throw new Error("Please set a valid treasury wallet address before placing bets");
+      }
+      
       const toPubkey = new web3.PublicKey(TREASURY_WALLET);
       
       // Create a transaction
+      console.log("Creating transaction with amount:", betAmount);
       const transaction = new web3.Transaction().add(
         // Create a transfer instruction
         web3.SystemProgram.transfer({
           fromPubkey,
           toPubkey,
-          lamports: betAmount * 1e9, // Convert SOL to lamports
+          lamports: Math.floor(betAmount * 1e9), // Convert SOL to lamports, ensure it's an integer
         })
       );
 
@@ -360,6 +392,7 @@ export default function ParlayBuilder() {
         timestamp: Date.now()
       };
 
+      console.log("Adding memo with bet data:", betData);
       // Use SPL Memo Program for transaction memo
       const encodedData = new TextEncoder().encode(JSON.stringify(betData).substring(0, 500));
       const memoInstruction = new web3.TransactionInstruction({
@@ -373,8 +406,11 @@ export default function ParlayBuilder() {
       let blockhash;
       try {
         setTransactionStatus("Getting recent blockhash...");
-        const { blockhash: recentBlockhash } = await connection.getRecentBlockhash();
-        blockhash = recentBlockhash;
+        console.log("Fetching recent blockhash...");
+        const result = await connection.getRecentBlockhash();
+        console.log("Got blockhash result:", result);
+        blockhash = result.blockhash;
+        console.log("Using blockhash:", blockhash);
       } catch (err) {
         console.error("Failed to get recent blockhash:", err);
         setTransactionStatus("Primary RPC endpoint failed. Trying alternative...");
@@ -386,8 +422,10 @@ export default function ParlayBuilder() {
         }
         
         // Try again with the new connection
-        const { blockhash: fallbackBlockhash } = await alternativeConnection.getRecentBlockhash();
-        blockhash = fallbackBlockhash;
+        console.log("Fetching blockhash from alternative endpoint...");
+        const alternativeResult = await alternativeConnection.getRecentBlockhash();
+        blockhash = alternativeResult.blockhash;
+        console.log("Got alternative blockhash:", blockhash);
       }
 
       transaction.recentBlockhash = blockhash;
@@ -395,12 +433,16 @@ export default function ParlayBuilder() {
 
       // Sign and send transaction
       setTransactionStatus("Awaiting wallet approval...");
+      console.log("Requesting transaction signature...");
       const signed = await window.solana.signTransaction(transaction);
+      console.log("Transaction signed:", signed);
       
       setTransactionStatus("Sending transaction to Solana...");
       let signature;
       try {
+        console.log("Sending raw transaction...");
         signature = await connection.sendRawTransaction(signed.serialize());
+        console.log("Transaction sent! Signature:", signature);
       } catch (sendError) {
         console.error("Error sending transaction:", sendError);
         
@@ -411,14 +453,18 @@ export default function ParlayBuilder() {
         }
         
         // Try again with the new connection
+        console.log("Trying to send with alternative connection...");
         signature = await alternativeConnection.sendRawTransaction(signed.serialize());
+        console.log("Transaction sent via alternative! Signature:", signature);
       }
       
       // Wait for confirmation
       setTransactionStatus("Confirming transaction...");
       let confirmation;
       try {
+        console.log("Waiting for confirmation...");
         confirmation = await connection.confirmTransaction(signature, 'confirmed');
+        console.log("Got confirmation:", confirmation);
       } catch (confirmError) {
         console.error("Error confirming transaction:", confirmError);
         
@@ -426,7 +472,9 @@ export default function ParlayBuilder() {
         const alternativeConnection = await tryAlternativeRpcEndpoint();
         if (!alternativeConnection) {
           // Even if we can't confirm, the transaction might still be processing
-          setTransactionStatus("Unable to confirm transaction, but it may still be processing. Transaction hash: " + signature);
+          const message = "Unable to confirm transaction, but it may still be processing. Transaction hash: " + signature;
+          console.log(message);
+          setTransactionStatus(message);
           
           // Add the bet to history anyway, but mark as pending
           const ticket = {
@@ -444,20 +492,19 @@ export default function ParlayBuilder() {
         }
         
         // Try again with the new connection
+        console.log("Confirming with alternative connection...");
         confirmation = await alternativeConnection.confirmTransaction(signature, 'confirmed');
+        console.log("Got confirmation from alternative:", confirmation);
       }
       
-      if (confirmation.value && confirmation.value.err) {
+      if (confirmation && confirmation.value && confirmation.value.err) {
+        console.error("Confirmation has error:", confirmation.value.err);
         throw new Error("Transaction failed: " + confirmation.value.err);
       }
 
       // Transaction succeeded
+      console.log("Transaction confirmed successfully!");
       setTransactionStatus("Transaction confirmed! Signature: " + signature);
-      
-      // Generate explorer URL based on network
-      const explorerBaseUrl = network === "mainnet-beta" 
-        ? "https://explorer.solana.com" 
-        : "https://explorer.solana.com?cluster=devnet";
       
       // Add bet to history with transaction signature
       const ticket = {
@@ -466,7 +513,7 @@ export default function ParlayBuilder() {
         timestamp: new Date().toISOString(),
         signature,
         status: 'confirmed',
-        explorerUrl: `${explorerBaseUrl}/tx/${signature}`
+        explorerUrl: `https://explorer.solana.com/tx/${signature}`
       };
       
       setHistory([ticket, ...history]);
@@ -475,7 +522,9 @@ export default function ParlayBuilder() {
       
       // Refresh wallet balance
       try {
+        console.log("Refreshing wallet balance...");
         const balance = await connection.getBalance(fromPubkey);
+        console.log("Updated balance:", balance);
         setWalletBalance((balance / 1e9).toFixed(2));
       } catch (balanceError) {
         console.error("Failed to refresh balance:", balanceError);
@@ -495,28 +544,18 @@ export default function ParlayBuilder() {
     <div className="p-4 space-y-6 bg-white text-black min-h-screen flex flex-col items-center">
       <div className="relative w-full max-w-2xl">
         <h1 className="text-4xl font-extrabold text-center">prly.fun</h1>
-        <div className="absolute right-0 top-0 flex space-x-2">
-          <select 
-            value={network} 
-            onChange={e => setNetwork(e.target.value)}
-            className="text-xs border rounded p-1"
-          >
-            <option value="mainnet-beta">Mainnet</option>
-            <option value="devnet">Devnet</option>
-          </select>
-          <Button
-            className="text-sm"
-            onClick={async () => {
-              if (walletAddress) {
-                setShowDisconnect(!showDisconnect);
-                return;
-              }
-              await connectWallet();
-            }}
-          >
-            {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)} (${walletBalance ?? '?'} SOL)` : "Connect Wallet"}
-          </Button>
-        </div>
+        <Button
+          className="absolute right-0 top-0 text-sm"
+          onClick={async () => {
+            if (walletAddress) {
+              setShowDisconnect(!showDisconnect);
+              return;
+            }
+            await connectWallet();
+          }}
+        >
+          {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)} (${walletBalance ?? '?'} SOL)` : "Connect Wallet"}
+        </Button>
         {showDisconnect && (
           <div className="absolute right-0 top-10 bg-white border p-2 shadow rounded">
             <Button className="text-sm" onClick={() => {
@@ -639,10 +678,9 @@ export default function ParlayBuilder() {
                   </div>
                 )}
                 
-                {/* Network Status */}
+                {/* Connection Status */}
                 <div className="mt-2 text-xs text-gray-500">
-                  Network: {network === "mainnet-beta" ? "Mainnet" : "Devnet"} | 
-                  RPC: {rpcEndpoint}
+                  RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})
                 </div>
               </div>
             </CardContent>
@@ -667,7 +705,7 @@ export default function ParlayBuilder() {
                       <div>
                         <strong>Transaction:</strong>{" "}
                         <a 
-                          href={ticket.explorerUrl || `https://explorer.solana.com/tx/${ticket.signature}${network === "devnet" ? "?cluster=devnet" : ""}`}
+                          href={ticket.explorerUrl || `https://explorer.solana.com/tx/${ticket.signature}`}
                           target="_blank" 
                           rel="noopener noreferrer"
                           className="text-blue-600 hover:underline"

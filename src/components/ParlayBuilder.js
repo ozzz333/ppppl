@@ -31,7 +31,7 @@ export default function ParlayBuilder() {
   const [currentRpcIndex, setCurrentRpcIndex] = useState(0);
 
   // Treasury wallet address where bets will be sent
-  const TREASURY_WALLET = "YOUR_TREASURY_WALLET_ADDRESS"; // Replace with your actual treasury wallet address
+  const TREASURY_WALLET = "DQeRRYooThKaTY4XZyeiFFpPnrqLSrdmEGhJzXpXYswg"; // Replace with your actual treasury wallet address
 
   // RPC Endpoints - using multiple options for reliability
   const RPC_ENDPOINTS = [

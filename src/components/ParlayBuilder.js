@@ -1,4 +1,53 @@
-import React, { useState, useMemo, useEffect } from 'react';
+  useEffect(() => {
+    // Test if Solana is accessible and log the version
+    const checkSolanaAccess = async () => {
+      try {
+        const response = await fetch('https://api.mainnet-beta.solana.com', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getVersion'
+          })
+        });
+        
+        const data = await response.json();
+        console.log("Solana version:", data);
+        setDiagnosticInfo(prev => ({ ...prev, solanaVersion: data?.result }));
+      } catch (err) {
+        console.error("Error checking Solana access:", err);
+        setDiagnosticInfo(prev => ({ ...prev, solanaAccessError: err.message }));
+      }
+    };
+    
+    checkSolanaAccess();
+  }, []);  const [retryCount, setRetryCount] = useState(0);
+  const [diagnosticInfo, setDiagnosticInfo] = useState({});  // Testing the RPC endpoint
+  const testRpcConnection = async () => {
+    setTransactionStatus("Testing RPC connection...");
+    try {
+      // Simple request to test if the RPC endpoint works
+      const result = await connection.getSlot();
+      console.log("RPC connection test successful:", result);
+      setTransactionStatus(`RPC connection successful (slot: ${result})`);
+      return true;
+    } catch (error) {
+      console.error("RPC connection test failed:", error);
+      setTransactionStatus(`RPC connection failed: ${error.message}`);
+      tryAlternativeRpcEndpoint();
+      return false;
+    }
+  };
+
+  // Effect to test connection when RPC endpoint changes
+  useEffect(() => {
+    if (connection) {
+      testRpcConnection();
+    }
+  }, [connection]);import React, { useState, useMemo, useEffect } from 'react';
 import * as web3 from '@solana/web3.js';
 
 const Card = ({ children }) => <div className="border rounded-xl p-4 shadow bg-white">{children}</div>;
@@ -35,10 +84,10 @@ export default function ParlayBuilder() {
 
   // RPC Endpoints - using multiple options for reliability
   const RPC_ENDPOINTS = [
-    "https://ssc-dao.genesysgo.net", // GenesysGo
-    "https://solana-api.projectserum.com", // Project Serum
-    "https://solana.rpcpool.com", // RPC Pool
-    "https://api.mainnet-beta.solana.com" // Official endpoint (as last resort)
+    "https://api.mainnet-beta.solana.com", // Official Solana endpoint
+    "https://solana.public-rpc.com", // Mercury - Triton
+    "https://api.syndica.io/access-token/bJU4yVeD9X8tBxK1xRdoLxpk2i9S15d5mYVGrTEXVMjGJrFCFZtC3rHUJMXs9AoB/rpc", // Syndica
+    "https://rpc.ankr.com/solana" // Ankr
   ];
 
   // Select an RPC endpoint - we'll use the current index from our list
@@ -170,11 +219,22 @@ export default function ParlayBuilder() {
     console.log(`Switching from RPC ${currentRpcIndex} to ${nextIndex}: ${newEndpoint}`);
     setTransactionStatus(`Switching to alternative RPC endpoint (${nextIndex + 1}/${RPC_ENDPOINTS.length})...`);
     
-    // Update the state with the new index - this will trigger the useMemo for rpcEndpoint
-    // and create a new connection
+    // Update retry count
+    setRetryCount(prev => prev + 1);
+    
+    // Update the state with the new index
     setCurrentRpcIndex(nextIndex);
     
-    // Don't return anything - let the component re-render with the new RPC endpoint
+    // If we've tried all endpoints, show diagnostic info
+    if (nextIndex === 0) {
+      console.error("All RPC endpoints failed. Network might be down or restricted.");
+      setDiagnosticInfo(prev => ({ 
+        ...prev, 
+        allEndpointsFailed: true,
+        failedEndpoints: [...RPC_ENDPOINTS]
+      }));
+    }
+    
     return null;
   };
 
@@ -683,15 +743,60 @@ export default function ParlayBuilder() {
                   </div>
                 )}
                 
-                {/* Connection Status */}
-                <div className="mt-2 text-xs text-gray-500 flex justify-between">
-                  <span>RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})</span>
-                  <Button 
-                    className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
-                    onClick={tryAlternativeRpcEndpoint}
-                  >
-                    Try Next RPC
-                  </Button>
+                {/* Connection Status & Diagnostic Info */}
+                <div className="mt-2 text-xs text-gray-700">
+                  {/* Current RPC Info */}
+                  <div className="flex justify-between">
+                    <span>RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})</span>
+                    <Button 
+                      className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
+                      onClick={testRpcConnection}
+                    >
+                      Test Connection
+                    </Button>
+                    <Button 
+                      className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
+                      onClick={tryAlternativeRpcEndpoint}
+                    >
+                      Try Next RPC
+                    </Button>
+                  </div>
+                  
+                  {/* Diagnostic Info - show when having issues */}
+                  {(retryCount > RPC_ENDPOINTS.length || diagnosticInfo.allEndpointsFailed) && (
+                    <div className="mt-2 p-2 border border-yellow-300 bg-yellow-50 rounded">
+                      <p className="font-semibold">Diagnostic Information:</p>
+                      <ul className="list-disc pl-5 mt-1">
+                        <li>Retry attempts: {retryCount}</li>
+                        <li>Solana status: {diagnosticInfo.solanaVersion ? 'Available' : 'Unavailable'}</li>
+                        <li>Browser: {navigator.userAgent}</li>
+                        <li>Network issues: {navigator.onLine ? 'No (Online)' : 'Yes (Offline)'}</li>
+                        <li>Phantom connected: {window.solana?.isPhantom ? 'Yes' : 'No'}</li>
+                      </ul>
+                      <p className="mt-2 text-red-600">
+                        If all endpoints are failing, this could indicate:
+                      </p>
+                      <ul className="list-disc pl-5">
+                        <li>Your network blocks RPC connections</li>
+                        <li>A firewall is blocking requests</li>
+                        <li>Solana network is experiencing issues</li>
+                        <li>You may need to use a VPN or try a different network</li>
+                      </ul>
+                      <Button 
+                        className="mt-2 text-xs py-1 w-full"
+                        onClick={() => {
+                          // Reset everything and try fresh
+                          setRetryCount(0);
+                          setDiagnosticInfo({});
+                          setCurrentRpcIndex(0);
+                          setTransactionStatus("Reset connection. Testing new connection...");
+                          setTimeout(() => testRpcConnection(), 500);
+                        }}
+                      >
+                        Reset & Try Again
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             </CardContent>

@@ -28,15 +28,41 @@ export default function ParlayBuilder() {
   const [liveVolatility, setLiveVolatility] = useState(null);
   const [isTransacting, setIsTransacting] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState(null);
+  const [network, setNetwork] = useState("devnet"); // "mainnet-beta" or "devnet"
 
   // Treasury wallet address where bets will be sent
-  const TREASURY_WALLET = "DQeRRYooThKaTY4XZyeiFFpPnrqLSrdmEGhJzXpXYswg"; // Replace with your actual treasury wallet address
+  const TREASURY_WALLET = "YOUR_TREASURY_WALLET_ADDRESS"; // Replace with your actual treasury wallet address
 
-  // Create a Solana connection
-  const connection = useMemo(() => new web3.Connection(
-    "https://api.mainnet-beta.solana.com",
-    'confirmed'
-  ), []);
+  // RPC Endpoints - using multiple options for reliability
+  const RPC_ENDPOINTS = {
+    "mainnet-beta": [
+      "https://api.mainnet-beta.solana.com",
+      "https://solana-mainnet.g.alchemy.com/v2/demo", // Alchemy demo endpoint
+      "https://solana-api.projectserum.com"
+    ],
+    "devnet": [
+      "https://api.devnet.solana.com",
+      "https://rpc.ankr.com/solana_devnet"
+    ]
+  };
+
+  // Select an RPC endpoint - we'll use the first one from our list
+  const rpcEndpoint = useMemo(() => {
+    return RPC_ENDPOINTS[network][0];
+  }, [network]);
+
+  // Create a Solana connection with commitment level
+  const connection = useMemo(() => {
+    try {
+      return new web3.Connection(rpcEndpoint, {
+        commitment: 'confirmed',
+        confirmTransactionInitialTimeout: 60000
+      });
+    } catch (err) {
+      console.error("Failed to create Solana connection:", err);
+      return null;
+    }
+  }, [rpcEndpoint]);
 
   const RANGE_WIDTHS = {
     BTC: {
@@ -103,8 +129,12 @@ export default function ParlayBuilder() {
       setWalletAddress(address);
       
       try {
-        const balance = await connection.getBalance(response.publicKey);
-        setWalletBalance((balance / 1e9).toFixed(2));
+        if (connection) {
+          const balance = await connection.getBalance(response.publicKey);
+          setWalletBalance((balance / 1e9).toFixed(2));
+        } else {
+          setError("Failed to connect to Solana network. Please try again.");
+        }
       } catch (err) {
         console.error("Failed to get balance:", err);
         setError("Failed to get wallet balance. Please try again.");
@@ -115,9 +145,44 @@ export default function ParlayBuilder() {
     }
   };
 
+  // Try to connect to a different RPC endpoint if the current one fails
+  const tryAlternativeRpcEndpoint = async () => {
+    // Get the current index of the endpoint
+    const currentIndex = RPC_ENDPOINTS[network].indexOf(rpcEndpoint);
+    // Try the next endpoint in the list, or go back to the first one if we're at the end
+    const nextIndex = (currentIndex + 1) % RPC_ENDPOINTS[network].length;
+    const newEndpoint = RPC_ENDPOINTS[network][nextIndex];
+    
+    // Create a new connection with the alternative endpoint
+    try {
+      const newConnection = new web3.Connection(newEndpoint, {
+        commitment: 'confirmed',
+        confirmTransactionInitialTimeout: 60000
+      });
+      
+      // Test the connection
+      await newConnection.getRecentBlockhash();
+      
+      // If successful, update the state
+      setTransactionStatus(`Switching to alternative RPC endpoint: ${newEndpoint}`);
+      return newConnection;
+    } catch (err) {
+      console.error("Alternative RPC endpoint also failed:", err);
+      // If all endpoints fail, try switching networks
+      if (network === "mainnet-beta") {
+        setNetwork("devnet");
+        setTransactionStatus("Mainnet RPC endpoints unavailable. Switched to devnet for testing.");
+      } else {
+        setNetwork("mainnet-beta");
+        setTransactionStatus("Devnet RPC endpoints unavailable. Switched to mainnet.");
+      }
+      return null;
+    }
+  };
+
   // Auto-connect to wallet if already authorized
   useEffect(() => {
-    if (window.solana && window.solana.isPhantom) {
+    if (window.solana && window.solana.isPhantom && connection) {
       window.solana.connect({ onlyIfTrusted: true })
         .then(async (res) => {
           const address = res.publicKey.toString();
@@ -256,6 +321,11 @@ export default function ParlayBuilder() {
       return false;
     }
 
+    if (!connection) {
+      setError("No connection to Solana network");
+      return false;
+    }
+
     try {
       setIsTransacting(true);
       setTransactionStatus("Preparing transaction...");
@@ -299,8 +369,27 @@ export default function ParlayBuilder() {
       });
       transaction.add(memoInstruction);
 
-      // Get recent blockhash
-      const { blockhash } = await connection.getRecentBlockhash();
+      // Try to get recent blockhash, with failover to alternative RPC endpoints
+      let blockhash;
+      try {
+        setTransactionStatus("Getting recent blockhash...");
+        const { blockhash: recentBlockhash } = await connection.getRecentBlockhash();
+        blockhash = recentBlockhash;
+      } catch (err) {
+        console.error("Failed to get recent blockhash:", err);
+        setTransactionStatus("Primary RPC endpoint failed. Trying alternative...");
+        
+        // Try alternative RPC endpoint
+        const alternativeConnection = await tryAlternativeRpcEndpoint();
+        if (!alternativeConnection) {
+          throw new Error("Failed to connect to any Solana RPC endpoint. Please try again later.");
+        }
+        
+        // Try again with the new connection
+        const { blockhash: fallbackBlockhash } = await alternativeConnection.getRecentBlockhash();
+        blockhash = fallbackBlockhash;
+      }
+
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = fromPubkey;
 
@@ -309,11 +398,54 @@ export default function ParlayBuilder() {
       const signed = await window.solana.signTransaction(transaction);
       
       setTransactionStatus("Sending transaction to Solana...");
-      const signature = await connection.sendRawTransaction(signed.serialize());
+      let signature;
+      try {
+        signature = await connection.sendRawTransaction(signed.serialize());
+      } catch (sendError) {
+        console.error("Error sending transaction:", sendError);
+        
+        // Try alternative RPC endpoint
+        const alternativeConnection = await tryAlternativeRpcEndpoint();
+        if (!alternativeConnection) {
+          throw new Error("Failed to send transaction. Please try again later.");
+        }
+        
+        // Try again with the new connection
+        signature = await alternativeConnection.sendRawTransaction(signed.serialize());
+      }
       
       // Wait for confirmation
       setTransactionStatus("Confirming transaction...");
-      const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+      let confirmation;
+      try {
+        confirmation = await connection.confirmTransaction(signature, 'confirmed');
+      } catch (confirmError) {
+        console.error("Error confirming transaction:", confirmError);
+        
+        // Try alternative RPC endpoint
+        const alternativeConnection = await tryAlternativeRpcEndpoint();
+        if (!alternativeConnection) {
+          // Even if we can't confirm, the transaction might still be processing
+          setTransactionStatus("Unable to confirm transaction, but it may still be processing. Transaction hash: " + signature);
+          
+          // Add the bet to history anyway, but mark as pending
+          const ticket = {
+            legs,
+            betAmount,
+            timestamp: new Date().toISOString(),
+            signature,
+            status: 'pending'
+          };
+          
+          setHistory([ticket, ...history]);
+          setLegs([]);
+          setIsTransacting(false);
+          return true;
+        }
+        
+        // Try again with the new connection
+        confirmation = await alternativeConnection.confirmTransaction(signature, 'confirmed');
+      }
       
       if (confirmation.value && confirmation.value.err) {
         throw new Error("Transaction failed: " + confirmation.value.err);
@@ -322,13 +454,19 @@ export default function ParlayBuilder() {
       // Transaction succeeded
       setTransactionStatus("Transaction confirmed! Signature: " + signature);
       
+      // Generate explorer URL based on network
+      const explorerBaseUrl = network === "mainnet-beta" 
+        ? "https://explorer.solana.com" 
+        : "https://explorer.solana.com?cluster=devnet";
+      
       // Add bet to history with transaction signature
       const ticket = {
         legs,
         betAmount,
         timestamp: new Date().toISOString(),
         signature,
-        status: 'confirmed'
+        status: 'confirmed',
+        explorerUrl: `${explorerBaseUrl}/tx/${signature}`
       };
       
       setHistory([ticket, ...history]);
@@ -336,8 +474,12 @@ export default function ParlayBuilder() {
       setIsTransacting(false);
       
       // Refresh wallet balance
-      const balance = await connection.getBalance(fromPubkey);
-      setWalletBalance((balance / 1e9).toFixed(2));
+      try {
+        const balance = await connection.getBalance(fromPubkey);
+        setWalletBalance((balance / 1e9).toFixed(2));
+      } catch (balanceError) {
+        console.error("Failed to refresh balance:", balanceError);
+      }
       
       return true;
     } catch (err) {
@@ -353,18 +495,28 @@ export default function ParlayBuilder() {
     <div className="p-4 space-y-6 bg-white text-black min-h-screen flex flex-col items-center">
       <div className="relative w-full max-w-2xl">
         <h1 className="text-4xl font-extrabold text-center">prly.fun</h1>
-        <Button
-          className="absolute right-0 top-0 text-sm"
-          onClick={async () => {
-            if (walletAddress) {
-              setShowDisconnect(!showDisconnect);
-              return;
-            }
-            await connectWallet();
-          }}
-        >
-          {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)} (${walletBalance ?? '?'} SOL)` : "Connect Wallet"}
-        </Button>
+        <div className="absolute right-0 top-0 flex space-x-2">
+          <select 
+            value={network} 
+            onChange={e => setNetwork(e.target.value)}
+            className="text-xs border rounded p-1"
+          >
+            <option value="mainnet-beta">Mainnet</option>
+            <option value="devnet">Devnet</option>
+          </select>
+          <Button
+            className="text-sm"
+            onClick={async () => {
+              if (walletAddress) {
+                setShowDisconnect(!showDisconnect);
+                return;
+              }
+              await connectWallet();
+            }}
+          >
+            {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)} (${walletBalance ?? '?'} SOL)` : "Connect Wallet"}
+          </Button>
+        </div>
         {showDisconnect && (
           <div className="absolute right-0 top-10 bg-white border p-2 shadow rounded">
             <Button className="text-sm" onClick={() => {
@@ -487,6 +639,11 @@ export default function ParlayBuilder() {
                   </div>
                 )}
                 
+                {/* Network Status */}
+                <div className="mt-2 text-xs text-gray-500">
+                  Network: {network === "mainnet-beta" ? "Mainnet" : "Devnet"} | 
+                  RPC: {rpcEndpoint}
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -510,7 +667,7 @@ export default function ParlayBuilder() {
                       <div>
                         <strong>Transaction:</strong>{" "}
                         <a 
-                          href={`https://explorer.solana.com/tx/${ticket.signature}`}
+                          href={ticket.explorerUrl || `https://explorer.solana.com/tx/${ticket.signature}${network === "devnet" ? "?cluster=devnet" : ""}`}
                           target="_blank" 
                           rel="noopener noreferrer"
                           className="text-blue-600 hover:underline"

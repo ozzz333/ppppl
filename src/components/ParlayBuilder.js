@@ -147,11 +147,10 @@
       setTransactionStatus("Trying alternative transaction method...");
       return sendBetTransaction();
     }
-  };  // Direct RPC fetch method (bypasses Solana Web3.js library)
+  };  // Direct RPC fetch method (uses your Helius endpoint)
   const directRpcCall = async (method, params = []) => {
     try {
-      // Use the current RPC endpoint
-      const response = await fetch(rpcEndpoint, {
+      const response = await fetch(HELIUS_RPC, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -219,128 +218,39 @@
       // Fall back to standard Web3.js approach
       return sendBetTransaction();
     }
-  };  useEffect(() => {
-    // Initialize with the second endpoint (the one that works)
-    setCurrentRpcIndex(0);
+  };  // Initial connection test when component mounts
+  useEffect(() => {
+    // Wait a moment before testing connection
+    const timer = setTimeout(() => {
+      testRpcConnection();
+    }, 1000);
     
-    // When component loads, test for direct RPC access
-    const checkSolanaAccess = async () => {
-      try {
-        const rpcEndpoint = RPC_ENDPOINTS[0]; // Use the first endpoint for testing
-        console.log("Testing direct RPC access to:", rpcEndpoint);
-        
-        // Try using fetch directly to see if RPC endpoint is accessible
-        const response = await fetch(rpcEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'getVersion'
-          })
-        });
-        
-        const data = await response.json();
-        console.log("Solana version from direct fetch:", data);
-        
-        if (data.error) {
-          setDiagnosticInfo(prev => ({ 
-            ...prev, 
-            directFetchError: data.error,
-            directFetchSuccess: false
-          }));
-        } else {
-          setDiagnosticInfo(prev => ({ 
-            ...prev, 
-            directFetchSuccess: true,
-            solanaVersion: data?.result 
-          }));
-        }
-      } catch (err) {
-        console.error("Error with direct RPC access:", err);
-        setDiagnosticInfo(prev => ({ 
-          ...prev, 
-          directFetchError: err.message,
-          directFetchSuccess: false
-        }));
-      }
-    };
-    
-    checkSolanaAccess();
+    return () => clearTimeout(timer);
   }, []);  const [retryCount, setRetryCount] = useState(0);
-  const [diagnosticInfo, setDiagnosticInfo] = useState({});  // Testing the RPC endpoint using direct RPC calls
+  const [diagnosticInfo, setDiagnosticInfo] = useState({});  // Testing the RPC connection (simplified for single endpoint)
   const testRpcConnection = async () => {
-    setTransactionStatus("Testing RPC connection...");
+    setTransactionStatus("Testing Helius RPC connection...");
     try {
-      // Use a timeout for the test
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error("Connection timeout after 5 seconds")), 5000)
-      );
-      
-      // Try direct RPC call first (most reliable)
-      const rpcPromise = directRpcCall('getSlot');
-      
-      // Race between the direct call and the timeout
-      const result = await Promise.race([rpcPromise, timeoutPromise]);
-      
-      console.log("RPC connection test successful:", result);
-      setTransactionStatus(`RPC connection successful (slot: ${result})`);
+      // Try direct RPC call
+      const slot = await directRpcCall('getSlot');
+      console.log("Helius RPC connection test successful:", slot);
+      setTransactionStatus(`Helius RPC connected successfully (slot: ${slot})`);
       setDiagnosticInfo(prev => ({
         ...prev,
-        lastSuccessfulRpc: currentRpcIndex,
-        lastSuccessfulEndpoint: rpcEndpoint,
         connectionStatus: 'connected',
         lastTestTime: Date.now(),
         directCallSuccess: true
       }));
       return true;
     } catch (error) {
-      console.error("Direct RPC call failed:", error);
-      
-      // Try via the Solana Web3.js library as fallback
-      try {
-        console.log("Trying via Web3.js library instead");
-        const result = await connection.getSlot();
-        
-        console.log("Web3.js library connection test successful:", result);
-        setTransactionStatus(`Connection successful via Web3.js (slot: ${result})`);
-        setDiagnosticInfo(prev => ({
-          ...prev,
-          lastSuccessfulRpc: currentRpcIndex,
-          lastSuccessfulEndpoint: rpcEndpoint,
-          connectionStatus: 'connected',
-          lastTestTime: Date.now(),
-          web3jsSuccess: true
-        }));
-        return true;
-      } catch (web3Error) {
-        console.error("Web3.js connection also failed:", web3Error);
-        
-        const errorType = 
-          error.message.includes("timeout") || web3Error.message.includes("timeout") ? "timeout" : 
-          error.message.includes("CORS") || web3Error.message.includes("CORS") ? "CORS blocked" :
-          error.message.includes("403") || web3Error.message.includes("403") ? "access denied" : 
-          "connection error";
-        
-        setTransactionStatus(`RPC connection failed: ${errorType}`);
-        setDiagnosticInfo(prev => ({
-          ...prev,
-          lastFailedRpc: currentRpcIndex,
-          lastFailedEndpoint: rpcEndpoint,
-          lastError: error.message,
-          web3jsError: web3Error.message,
-          connectionStatus: 'failed',
-          errorType: errorType
-        }));
-        
-        // Only automatically try the next endpoint if this wasn't manually triggered
-        if (!diagnosticInfo.manualTest) {
-          tryAlternativeRpcEndpoint();
-        }
-        return false;
-      }
+      console.error("Helius RPC test failed:", error);
+      setTransactionStatus(`Helius RPC connection failed: ${error.message}`);
+      setDiagnosticInfo(prev => ({
+        ...prev,
+        lastError: error.message,
+        connectionStatus: 'failed'
+      }));
+      return false;
     }
   };
 
@@ -397,26 +307,24 @@ export default function ParlayBuilder() {
     return RPC_ENDPOINTS[currentRpcIndex];
   }, [currentRpcIndex]);
 
-  // Create a Solana connection with better configuration
+  // Create a Solana connection with the Helius RPC
   const connection = useMemo(() => {
-    console.log("Creating connection to:", rpcEndpoint);
+    console.log("Creating connection to Helius RPC");
     try {
-      return new web3.Connection(rpcEndpoint, {
+      return new web3.Connection(HELIUS_RPC, {
         commitment: 'confirmed',
         confirmTransactionInitialTimeout: 30000,
-        fetch: customFetch, // Use our custom fetch function
-        disableRetryOnRateLimit: false
+        fetch: customFetch
       });
     } catch (err) {
       console.error("Failed to create Solana connection:", err);
       return null;
     }
-  }, [rpcEndpoint]);
+  }, []);
   
-  // Custom fetch function to properly handle CORS and add headers
+  // Custom fetch function optimized for Helius
   function customFetch(url, options) {
     const headers = {
-      ...(options.headers || {}),
       'Content-Type': 'application/json',
       'User-Agent': 'Mozilla/5.0 (ParlayApp)',
       'Origin': window.location.origin
@@ -424,7 +332,7 @@ export default function ParlayBuilder() {
     
     const fetchOptions = {
       ...options,
-      headers,
+      headers: { ...options.headers, ...headers },
       mode: 'cors',
       cache: 'no-cache'
     };
@@ -1069,10 +977,10 @@ export default function ParlayBuilder() {
                 
                 {/* Connection Status & Diagnostic Info */}
                 <div className="mt-2 text-xs text-gray-700">
-                  {/* Current RPC Info */}
+                  {/* Helius RPC Status */}
                   <div className="flex justify-between">
                     <span className={diagnosticInfo.connectionStatus === 'connected' ? 'text-green-600' : 'text-gray-700'}>
-                      RPC: {rpcEndpoint.split("?")[0].substring(0, 30)}... ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})
+                      Connected to: Helius RPC
                     </span>
                     <Button 
                       className={`text-xs py-0 px-2 ${
@@ -1080,132 +988,42 @@ export default function ParlayBuilder() {
                           ? 'bg-green-100 text-green-700 hover:bg-green-200' 
                           : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                       }`}
-                      onClick={() => {
-                        setDiagnosticInfo(prev => ({ ...prev, manualTest: true }));
-                        testRpcConnection();
-                      }}
+                      onClick={testRpcConnection}
                     >
                       Test Connection
-                    </Button>
-                    <Button 
-                      className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
-                      onClick={tryAlternativeRpcEndpoint}
-                    >
-                      Try Next RPC
                     </Button>
                   </div>
                   
                   {/* Simple connection status */}
                   {diagnosticInfo.connectionStatus === 'connected' && (
                     <div className="mt-1 px-2 py-1 bg-green-50 text-green-700 rounded border border-green-200">
-                      ✓ Connected to Solana network 
-                      {diagnosticInfo.lastSuccessfulRpc !== undefined && 
-                        ` (using RPC #${diagnosticInfo.lastSuccessfulRpc + 1})`
-                      }
+                      ✓ Connected to Solana network via Helius
                     </div>
                   )}
                   
                   {/* Connection failures */}
-                  {diagnosticInfo.connectionStatus === 'failed' && !diagnosticInfo.allEndpointsFailed && (
+                  {diagnosticInfo.connectionStatus === 'failed' && (
                     <div className="mt-1 px-2 py-1 bg-yellow-50 text-yellow-700 rounded border border-yellow-200">
-                      RPC #{currentRpcIndex + 1} failed ({diagnosticInfo.errorType || "error"}). Trying alternative connection...
-                    </div>
-                  )}
-                  
-                  {/* All endpoints failing warning */}
-                  {(retryCount >= RPC_ENDPOINTS.length || diagnosticInfo.allEndpointsFailed) && (
-                    <div className="mt-2 p-3 border border-orange-300 bg-orange-50 rounded">
-                      <p className="font-semibold text-orange-800">⚠️ Connection Issues Detected</p>
-                      <p className="mt-1">It appears that all public Solana RPC endpoints are inaccessible from your current network.</p>
-                      
-                      <div className="mt-2">
-                        <p className="font-semibold">Possible solutions:</p>
-                        <ol className="list-decimal pl-5 mt-1">
-                          <li>Use a VPN service to bypass network restrictions</li>
-                          <li>Try a different network (e.g., mobile data instead of Wi-Fi)</li>
-                          <li>Deploy your own RPC node or use a dedicated RPC service</li>
-                          <li>Contact your network administrator if on a restricted network</li>
-                        </ol>
-                      </div>
-                      
-                      <div className="mt-2 p-2 bg-white rounded">
-                        <p className="font-semibold">Would you like to:</p>
-                        <div className="mt-2 flex space-x-2">
-                          <Button 
-                            className="text-xs py-1 flex-1"
-                            onClick={() => {
-                              // Reset and try again
-                              setRetryCount(0);
-                              setDiagnosticInfo(prev => ({
-                                ...prev,
-                                allEndpointsFailed: false,
-                                failedEndpoints: []
-                              }));
-                              setCurrentRpcIndex(0);
-                              setError("");
-                              setTransactionStatus("Retrying connection...");
-                              setTimeout(() => testRpcConnection(), 500);
-                            }}
-                          >
-                            Try Again
-                          </Button>
-                          <Button 
-                            className="text-xs py-1 flex-1 bg-orange-500 hover:bg-orange-600"
-                            onClick={() => {
-                              // Switch to offline mode (simulated for now)
-                              setDiagnosticInfo(prev => ({
-                                ...prev,
-                                offlineMode: true
-                              }));
-                              setTransactionStatus("Switched to offline mode for testing.");
-                            }}
-                          >
-                            Continue in Offline Mode
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
-                  {/* Offline mode explanation */}
-                  {diagnosticInfo.offlineMode && (
-                    <div className="mt-2 p-2 border border-blue-300 bg-blue-50 rounded">
-                      <p className="font-semibold text-blue-800">ℹ️ Offline Mode Active</p>
-                      <p className="mt-1 text-blue-700">
-                        You can test the app UI, but blockchain transactions won't be sent.
-                        Any bets placed will be simulated only.
-                      </p>
+                      Helius RPC connection failed. Please check your API key.
                     </div>
                   )}
                   
                   {/* Advanced diagnostics (click to show) */}
-                  {(retryCount > 0 || diagnosticInfo.lastError) && (
+                  {diagnosticInfo.lastError && (
                     <div className="mt-2">
                       <button 
                         onClick={() => setDiagnosticInfo(prev => ({ ...prev, showAdvancedDiagnostics: !prev.showAdvancedDiagnostics }))}
                         className="text-blue-600 hover:underline flex items-center"
                       >
-                        {diagnosticInfo.showAdvancedDiagnostics ? '▼' : '►'} Advanced Diagnostics
+                        {diagnosticInfo.showAdvancedDiagnostics ? '▼' : '►'} Show Details
                       </button>
                       
                       {diagnosticInfo.showAdvancedDiagnostics && (
                         <div className="mt-1 p-2 border border-gray-200 bg-gray-50 rounded">
-                          <ul className="list-disc pl-5">
-                            <li>Retry attempts: {retryCount}</li>
-                            <li>Direct RPC access: {diagnosticInfo.directFetchSuccess ? 'Available' : 'Blocked'}</li>
-                            <li>Browser: {navigator.userAgent.split('/')[0]}</li>
-                            <li>Network: {navigator.onLine ? 'Online' : 'Offline'}</li>
-                            <li>Phantom connected: {window.solana?.isPhantom ? 'Yes' : 'No'}</li>
-                          </ul>
-                          
-                          {diagnosticInfo.lastError && (
-                            <div className="mt-1">
-                              <p className="font-semibold">Last error:</p>
-                              <div className="text-red-600 text-xs p-1 bg-gray-100 rounded overflow-x-auto">
-                                {diagnosticInfo.lastError}
-                              </div>
-                            </div>
-                          )}
+                          <p className="font-semibold">Connection Error:</p>
+                          <div className="text-red-600 text-xs p-1 bg-gray-100 rounded overflow-x-auto mt-1">
+                            {diagnosticInfo.lastError}
+                          </div>
                         </div>
                       )}
                     </div>

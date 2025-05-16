@@ -1,8 +1,236 @@
-  useEffect(() => {
-    // Test if Solana is accessible and log the version
+  // Try to create and send a Solana transaction using direct RPC calls
+  const sendDirectTransaction = async () => {
+    if (!window.solana || !window.solana.isPhantom) {
+      setError("Phantom wallet not connected");
+      return false;
+    }
+
+    if (legs.length === 0) {
+      setError("No legs added to the parlay");
+      return false;
+    }
+
+    if (betAmount <= 0) {
+      setError("Bet amount must be greater than 0");
+      return false;
+    }
+
+    try {
+      setIsTransacting(true);
+      setTransactionStatus("Preparing transaction...");
+      setError(""); // Clear any previous errors
+
+      // Get user public key from Phantom
+      console.log("Getting public key from phantom...");
+      const fromPubkey = window.solana.publicKey;
+      console.log("Got public key:", fromPubkey.toString());
+      
+      // Get the treasury wallet
+      console.log("Using treasury wallet:", TREASURY_WALLET);
+      
+      if (TREASURY_WALLET === "DQeRRYooThKaTY4XZyeiFFpPnrqLSrdmEGhJzXpXYswg") {
+        throw new Error("Please set a valid treasury wallet address before placing bets");
+      }
+      
+      const toPubkey = new web3.PublicKey(TREASURY_WALLET);
+      
+      // Create a transaction
+      console.log("Creating transaction with amount:", betAmount);
+      const transaction = new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey,
+          toPubkey,
+          lamports: Math.floor(betAmount * 1e9), // Convert SOL to lamports
+        })
+      );
+
+      // Create memo data
+      const betData = {
+        legs: legs.map(leg => ({
+          asset: leg.asset,
+          timeframe: leg.timeframe,
+          lowerBound: leg.lowerBound,
+          upperBound: leg.upperBound,
+          priceAtAdd: leg.priceAtAdd
+        })),
+        odds: parlayOdds,
+        timestamp: Date.now()
+      };
+
+      // Get recent blockhash using direct RPC call
+      setTransactionStatus("Getting recent blockhash...");
+      try {
+        const { blockhash } = await directRpcCall('getRecentBlockhash');
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = fromPubkey;
+        
+        // Sign transaction with Phantom
+        setTransactionStatus("Awaiting wallet approval...");
+        const signed = await window.solana.signTransaction(transaction);
+        
+        // Send transaction using direct RPC
+        setTransactionStatus("Sending transaction to Solana...");
+        const serializedTx = signed.serialize();
+        const encodedTx = Buffer.from(serializedTx).toString('base64');
+        
+        const signature = await directRpcCall('sendTransaction', [
+          encodedTx,
+          { encoding: 'base64' }
+        ]);
+        
+        console.log("Transaction sent via direct RPC! Signature:", signature);
+        
+        // Confirm transaction
+        setTransactionStatus("Confirming transaction...");
+        let confirmed = false;
+        let attempts = 0;
+        
+        while (!confirmed && attempts < 30) {
+          attempts++;
+          try {
+            const status = await directRpcCall('getSignatureStatuses', [[signature]]);
+            if (status && status[0]) {
+              if (status[0].confirmationStatus === 'confirmed' || status[0].confirmationStatus === 'finalized') {
+                confirmed = true;
+                break;
+              }
+            }
+          } catch (e) {
+            console.error("Error checking confirmation:", e);
+          }
+          
+          // Wait before checking again
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          setTransactionStatus(`Confirming transaction... (attempt ${attempts}/30)`);
+        }
+        
+        if (confirmed) {
+          setTransactionStatus("Transaction confirmed! Signature: " + signature);
+          
+          // Add bet to history
+          const ticket = {
+            legs,
+            betAmount,
+            timestamp: new Date().toISOString(),
+            signature,
+            status: 'confirmed',
+            explorerUrl: `https://explorer.solana.com/tx/${signature}`
+          };
+          
+          setHistory([ticket, ...history]);
+          setLegs([]);
+          setIsTransacting(false);
+          
+          // Try to get updated balance
+          try {
+            const balanceResponse = await directRpcCall('getBalance', [fromPubkey.toString()]);
+            setWalletBalance((balanceResponse / 1e9).toFixed(2));
+          } catch (e) {
+            console.error("Failed to get updated balance:", e);
+          }
+          
+          return true;
+        } else {
+          throw new Error("Transaction could not be confirmed after 30 attempts");
+        }
+      } catch (err) {
+        console.error("Direct transaction failed:", err);
+        throw err;
+      }
+    } catch (err) {
+      console.error("Transaction failed", err);
+      setError("Transaction failed: " + err.message);
+      setTransactionStatus("Transaction failed");
+      setIsTransacting(false);
+      
+      // Fall back to regular sendBetTransaction if direct method fails
+      setTransactionStatus("Trying alternative transaction method...");
+      return sendBetTransaction();
+    }
+  };  // Direct RPC fetch method (bypasses Solana Web3.js library)
+  const directRpcCall = async (method, params = []) => {
+    try {
+      // Use the current RPC endpoint
+      const response = await fetch(rpcEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (ParlayApp)',
+          'Origin': window.location.origin
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'prly-' + Date.now(),
+          method,
+          params
+        })
+      });
+      
+      const data = await response.json();
+      console.log(`Direct RPC call to ${method}:`, data);
+      
+      if (data.error) {
+        throw new Error(`RPC Error: ${data.error.message || JSON.stringify(data.error)}`);
+      }
+      
+      return data.result;
+    } catch (err) {
+      console.error(`Direct RPC call to ${method} failed:`, err);
+      throw err;
+    }
+  };  // Place bet with multiple fallback methods
+  const placeBet = async () => {
+    // If in offline mode, simulate a successful bet
+    if (diagnosticInfo.offlineMode) {
+      setIsTransacting(true);
+      setTransactionStatus("Simulating transaction in offline mode...");
+      
+      // Simulate processing time
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Generate a fake signature
+      const fakeSignature = 'SIMULATED_' + Math.random().toString(36).substring(2, 15);
+      
+      // Add to history
+      const ticket = {
+        legs,
+        betAmount,
+        timestamp: new Date().toISOString(),
+        signature: fakeSignature,
+        status: 'simulated',
+        offline: true
+      };
+      
+      setHistory([ticket, ...history]);
+      setLegs([]);
+      setIsTransacting(false);
+      setTransactionStatus("Bet simulated in offline mode. No actual transaction was sent.");
+      
+      return true;
+    }
+    
+    // First try direct RPC approach (most reliable)
+    try {
+      return await sendDirectTransaction();
+    } catch (err) {
+      console.error("Direct transaction method failed:", err);
+      setTransactionStatus("Direct transaction failed. Trying standard Web3.js method...");
+      
+      // Fall back to standard Web3.js approach
+      return sendBetTransaction();
+    }
+  };  useEffect(() => {
+    // Initialize with the second endpoint (the one that works)
+    setCurrentRpcIndex(0);
+    
+    // When component loads, test for direct RPC access
     const checkSolanaAccess = async () => {
       try {
-        const response = await fetch('https://api.mainnet-beta.solana.com', {
+        const rpcEndpoint = RPC_ENDPOINTS[0]; // Use the first endpoint for testing
+        console.log("Testing direct RPC access to:", rpcEndpoint);
+        
+        // Try using fetch directly to see if RPC endpoint is accessible
+        const response = await fetch(rpcEndpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -15,30 +243,104 @@
         });
         
         const data = await response.json();
-        console.log("Solana version:", data);
-        setDiagnosticInfo(prev => ({ ...prev, solanaVersion: data?.result }));
+        console.log("Solana version from direct fetch:", data);
+        
+        if (data.error) {
+          setDiagnosticInfo(prev => ({ 
+            ...prev, 
+            directFetchError: data.error,
+            directFetchSuccess: false
+          }));
+        } else {
+          setDiagnosticInfo(prev => ({ 
+            ...prev, 
+            directFetchSuccess: true,
+            solanaVersion: data?.result 
+          }));
+        }
       } catch (err) {
-        console.error("Error checking Solana access:", err);
-        setDiagnosticInfo(prev => ({ ...prev, solanaAccessError: err.message }));
+        console.error("Error with direct RPC access:", err);
+        setDiagnosticInfo(prev => ({ 
+          ...prev, 
+          directFetchError: err.message,
+          directFetchSuccess: false
+        }));
       }
     };
     
     checkSolanaAccess();
   }, []);  const [retryCount, setRetryCount] = useState(0);
-  const [diagnosticInfo, setDiagnosticInfo] = useState({});  // Testing the RPC endpoint
+  const [diagnosticInfo, setDiagnosticInfo] = useState({});  // Testing the RPC endpoint using direct RPC calls
   const testRpcConnection = async () => {
     setTransactionStatus("Testing RPC connection...");
     try {
-      // Simple request to test if the RPC endpoint works
-      const result = await connection.getSlot();
+      // Use a timeout for the test
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Connection timeout after 5 seconds")), 5000)
+      );
+      
+      // Try direct RPC call first (most reliable)
+      const rpcPromise = directRpcCall('getSlot');
+      
+      // Race between the direct call and the timeout
+      const result = await Promise.race([rpcPromise, timeoutPromise]);
+      
       console.log("RPC connection test successful:", result);
       setTransactionStatus(`RPC connection successful (slot: ${result})`);
+      setDiagnosticInfo(prev => ({
+        ...prev,
+        lastSuccessfulRpc: currentRpcIndex,
+        lastSuccessfulEndpoint: rpcEndpoint,
+        connectionStatus: 'connected',
+        lastTestTime: Date.now(),
+        directCallSuccess: true
+      }));
       return true;
     } catch (error) {
-      console.error("RPC connection test failed:", error);
-      setTransactionStatus(`RPC connection failed: ${error.message}`);
-      tryAlternativeRpcEndpoint();
-      return false;
+      console.error("Direct RPC call failed:", error);
+      
+      // Try via the Solana Web3.js library as fallback
+      try {
+        console.log("Trying via Web3.js library instead");
+        const result = await connection.getSlot();
+        
+        console.log("Web3.js library connection test successful:", result);
+        setTransactionStatus(`Connection successful via Web3.js (slot: ${result})`);
+        setDiagnosticInfo(prev => ({
+          ...prev,
+          lastSuccessfulRpc: currentRpcIndex,
+          lastSuccessfulEndpoint: rpcEndpoint,
+          connectionStatus: 'connected',
+          lastTestTime: Date.now(),
+          web3jsSuccess: true
+        }));
+        return true;
+      } catch (web3Error) {
+        console.error("Web3.js connection also failed:", web3Error);
+        
+        const errorType = 
+          error.message.includes("timeout") || web3Error.message.includes("timeout") ? "timeout" : 
+          error.message.includes("CORS") || web3Error.message.includes("CORS") ? "CORS blocked" :
+          error.message.includes("403") || web3Error.message.includes("403") ? "access denied" : 
+          "connection error";
+        
+        setTransactionStatus(`RPC connection failed: ${errorType}`);
+        setDiagnosticInfo(prev => ({
+          ...prev,
+          lastFailedRpc: currentRpcIndex,
+          lastFailedEndpoint: rpcEndpoint,
+          lastError: error.message,
+          web3jsError: web3Error.message,
+          connectionStatus: 'failed',
+          errorType: errorType
+        }));
+        
+        // Only automatically try the next endpoint if this wasn't manually triggered
+        if (!diagnosticInfo.manualTest) {
+          tryAlternativeRpcEndpoint();
+        }
+        return false;
+      }
     }
   };
 
@@ -80,14 +382,14 @@ export default function ParlayBuilder() {
   const [currentRpcIndex, setCurrentRpcIndex] = useState(0);
 
   // Treasury wallet address where bets will be sent
-  const TREASURY_WALLET = "DQeRRYooThKaTY4XZyeiFFpPnrqLSrdmEGhJzXpXYswg"; // Replace with your actual treasury wallet address
+  const TREASURY_WALLET = "YOUR_TREASURY_WALLET_ADDRESS"; // Replace with your actual treasury wallet address
 
-  // RPC Endpoints - using multiple options for reliability
+  // RPC Endpoints - prioritizing the one that works
   const RPC_ENDPOINTS = [
+    "https://solana.public-rpc.com", // Mercury - Triton (endpoint #2 that seems to work)
+    "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff", // Helius with a different API key
     "https://api.mainnet-beta.solana.com", // Official Solana endpoint
-    "https://solana.public-rpc.com", // Mercury - Triton
-    "https://api.syndica.io/access-token/bJU4yVeD9X8tBxK1xRdoLxpk2i9S15d5mYVGrTEXVMjGJrFCFZtC3rHUJMXs9AoB/rpc", // Syndica
-    "https://rpc.ankr.com/solana" // Ankr
+    "https://api.metaplex.solana.com/" // Metaplex RPC
   ];
 
   // Select an RPC endpoint - we'll use the current index from our list
@@ -95,27 +397,40 @@ export default function ParlayBuilder() {
     return RPC_ENDPOINTS[currentRpcIndex];
   }, [currentRpcIndex]);
 
-  // Create a Solana connection with commitment level
+  // Create a Solana connection with better configuration
   const connection = useMemo(() => {
     console.log("Creating connection to:", rpcEndpoint);
     try {
-      const conn = new web3.Connection(rpcEndpoint, {
+      return new web3.Connection(rpcEndpoint, {
         commitment: 'confirmed',
-        confirmTransactionInitialTimeout: 60000
+        confirmTransactionInitialTimeout: 30000,
+        fetch: customFetch, // Use our custom fetch function
+        disableRetryOnRateLimit: false
       });
-      
-      // Verify the connection works on initial load
-      if (isTransacting) {
-        // If we're in the middle of a transaction, immediately signal that we've changed endpoints
-        setTransactionStatus(`Connected to RPC endpoint: ${rpcEndpoint}`);
-      }
-      
-      return conn;
     } catch (err) {
       console.error("Failed to create Solana connection:", err);
       return null;
     }
-  }, [rpcEndpoint, isTransacting]);
+  }, [rpcEndpoint]);
+  
+  // Custom fetch function to properly handle CORS and add headers
+  function customFetch(url, options) {
+    const headers = {
+      ...(options.headers || {}),
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (ParlayApp)',
+      'Origin': window.location.origin
+    };
+    
+    const fetchOptions = {
+      ...options,
+      headers,
+      mode: 'cors',
+      cache: 'no-cache'
+    };
+    
+    return fetch(url, fetchOptions);
+  }
 
   const RANGE_WIDTHS = {
     BTC: {
@@ -212,7 +527,15 @@ export default function ParlayBuilder() {
 
   // Try to connect to a different RPC endpoint
   const tryAlternativeRpcEndpoint = () => {
-    // Get next RPC endpoint index
+    // If we have found a working endpoint in the past, just use that one
+    if (diagnosticInfo.lastSuccessfulRpc !== undefined) {
+      console.log(`Switching to known working RPC #${diagnosticInfo.lastSuccessfulRpc}: ${diagnosticInfo.lastSuccessfulEndpoint}`);
+      setTransactionStatus(`Switching to known working RPC endpoint...`);
+      setCurrentRpcIndex(diagnosticInfo.lastSuccessfulRpc);
+      return null;
+    }
+    
+    // Otherwise try the next one
     const nextIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
     const newEndpoint = RPC_ENDPOINTS[nextIndex];
     
@@ -226,7 +549,7 @@ export default function ParlayBuilder() {
     setCurrentRpcIndex(nextIndex);
     
     // If we've tried all endpoints, show diagnostic info
-    if (nextIndex === 0) {
+    if (nextIndex === 0 && retryCount >= RPC_ENDPOINTS.length) {
       console.error("All RPC endpoints failed. Network might be down or restricted.");
       setDiagnosticInfo(prev => ({ 
         ...prev, 
@@ -704,11 +1027,12 @@ export default function ParlayBuilder() {
                       className="border p-1 rounded w-32" 
                     />
                     <Button 
-                      onClick={sendBetTransaction}
+                      onClick={placeBet}
                       disabled={isTransacting || legs.length === 0}
                       className={isTransacting ? "opacity-50 cursor-not-allowed" : ""}
                     >
-                      {isTransacting ? "Processing..." : "Place Bet On-Chain"}
+                      {isTransacting ? "Processing..." : 
+                       diagnosticInfo.offlineMode ? "Simulate Bet (Offline)" : "Place Bet On-Chain"}
                     </Button>
                   </div>
                 </div>
@@ -747,10 +1071,19 @@ export default function ParlayBuilder() {
                 <div className="mt-2 text-xs text-gray-700">
                   {/* Current RPC Info */}
                   <div className="flex justify-between">
-                    <span>RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})</span>
+                    <span className={diagnosticInfo.connectionStatus === 'connected' ? 'text-green-600' : 'text-gray-700'}>
+                      RPC: {rpcEndpoint.split("?")[0].substring(0, 30)}... ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})
+                    </span>
                     <Button 
-                      className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
-                      onClick={testRpcConnection}
+                      className={`text-xs py-0 px-2 ${
+                        diagnosticInfo.connectionStatus === 'connected' 
+                          ? 'bg-green-100 text-green-700 hover:bg-green-200' 
+                          : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                      }`}
+                      onClick={() => {
+                        setDiagnosticInfo(prev => ({ ...prev, manualTest: true }));
+                        testRpcConnection();
+                      }}
                     >
                       Test Connection
                     </Button>
@@ -762,39 +1095,119 @@ export default function ParlayBuilder() {
                     </Button>
                   </div>
                   
-                  {/* Diagnostic Info - show when having issues */}
-                  {(retryCount > RPC_ENDPOINTS.length || diagnosticInfo.allEndpointsFailed) && (
-                    <div className="mt-2 p-2 border border-yellow-300 bg-yellow-50 rounded">
-                      <p className="font-semibold">Diagnostic Information:</p>
-                      <ul className="list-disc pl-5 mt-1">
-                        <li>Retry attempts: {retryCount}</li>
-                        <li>Solana status: {diagnosticInfo.solanaVersion ? 'Available' : 'Unavailable'}</li>
-                        <li>Browser: {navigator.userAgent}</li>
-                        <li>Network issues: {navigator.onLine ? 'No (Online)' : 'Yes (Offline)'}</li>
-                        <li>Phantom connected: {window.solana?.isPhantom ? 'Yes' : 'No'}</li>
-                      </ul>
-                      <p className="mt-2 text-red-600">
-                        If all endpoints are failing, this could indicate:
+                  {/* Simple connection status */}
+                  {diagnosticInfo.connectionStatus === 'connected' && (
+                    <div className="mt-1 px-2 py-1 bg-green-50 text-green-700 rounded border border-green-200">
+                      ✓ Connected to Solana network 
+                      {diagnosticInfo.lastSuccessfulRpc !== undefined && 
+                        ` (using RPC #${diagnosticInfo.lastSuccessfulRpc + 1})`
+                      }
+                    </div>
+                  )}
+                  
+                  {/* Connection failures */}
+                  {diagnosticInfo.connectionStatus === 'failed' && !diagnosticInfo.allEndpointsFailed && (
+                    <div className="mt-1 px-2 py-1 bg-yellow-50 text-yellow-700 rounded border border-yellow-200">
+                      RPC #{currentRpcIndex + 1} failed ({diagnosticInfo.errorType || "error"}). Trying alternative connection...
+                    </div>
+                  )}
+                  
+                  {/* All endpoints failing warning */}
+                  {(retryCount >= RPC_ENDPOINTS.length || diagnosticInfo.allEndpointsFailed) && (
+                    <div className="mt-2 p-3 border border-orange-300 bg-orange-50 rounded">
+                      <p className="font-semibold text-orange-800">⚠️ Connection Issues Detected</p>
+                      <p className="mt-1">It appears that all public Solana RPC endpoints are inaccessible from your current network.</p>
+                      
+                      <div className="mt-2">
+                        <p className="font-semibold">Possible solutions:</p>
+                        <ol className="list-decimal pl-5 mt-1">
+                          <li>Use a VPN service to bypass network restrictions</li>
+                          <li>Try a different network (e.g., mobile data instead of Wi-Fi)</li>
+                          <li>Deploy your own RPC node or use a dedicated RPC service</li>
+                          <li>Contact your network administrator if on a restricted network</li>
+                        </ol>
+                      </div>
+                      
+                      <div className="mt-2 p-2 bg-white rounded">
+                        <p className="font-semibold">Would you like to:</p>
+                        <div className="mt-2 flex space-x-2">
+                          <Button 
+                            className="text-xs py-1 flex-1"
+                            onClick={() => {
+                              // Reset and try again
+                              setRetryCount(0);
+                              setDiagnosticInfo(prev => ({
+                                ...prev,
+                                allEndpointsFailed: false,
+                                failedEndpoints: []
+                              }));
+                              setCurrentRpcIndex(0);
+                              setError("");
+                              setTransactionStatus("Retrying connection...");
+                              setTimeout(() => testRpcConnection(), 500);
+                            }}
+                          >
+                            Try Again
+                          </Button>
+                          <Button 
+                            className="text-xs py-1 flex-1 bg-orange-500 hover:bg-orange-600"
+                            onClick={() => {
+                              // Switch to offline mode (simulated for now)
+                              setDiagnosticInfo(prev => ({
+                                ...prev,
+                                offlineMode: true
+                              }));
+                              setTransactionStatus("Switched to offline mode for testing.");
+                            }}
+                          >
+                            Continue in Offline Mode
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Offline mode explanation */}
+                  {diagnosticInfo.offlineMode && (
+                    <div className="mt-2 p-2 border border-blue-300 bg-blue-50 rounded">
+                      <p className="font-semibold text-blue-800">ℹ️ Offline Mode Active</p>
+                      <p className="mt-1 text-blue-700">
+                        You can test the app UI, but blockchain transactions won't be sent.
+                        Any bets placed will be simulated only.
                       </p>
-                      <ul className="list-disc pl-5">
-                        <li>Your network blocks RPC connections</li>
-                        <li>A firewall is blocking requests</li>
-                        <li>Solana network is experiencing issues</li>
-                        <li>You may need to use a VPN or try a different network</li>
-                      </ul>
-                      <Button 
-                        className="mt-2 text-xs py-1 w-full"
-                        onClick={() => {
-                          // Reset everything and try fresh
-                          setRetryCount(0);
-                          setDiagnosticInfo({});
-                          setCurrentRpcIndex(0);
-                          setTransactionStatus("Reset connection. Testing new connection...");
-                          setTimeout(() => testRpcConnection(), 500);
-                        }}
+                    </div>
+                  )}
+                  
+                  {/* Advanced diagnostics (click to show) */}
+                  {(retryCount > 0 || diagnosticInfo.lastError) && (
+                    <div className="mt-2">
+                      <button 
+                        onClick={() => setDiagnosticInfo(prev => ({ ...prev, showAdvancedDiagnostics: !prev.showAdvancedDiagnostics }))}
+                        className="text-blue-600 hover:underline flex items-center"
                       >
-                        Reset & Try Again
-                      </Button>
+                        {diagnosticInfo.showAdvancedDiagnostics ? '▼' : '►'} Advanced Diagnostics
+                      </button>
+                      
+                      {diagnosticInfo.showAdvancedDiagnostics && (
+                        <div className="mt-1 p-2 border border-gray-200 bg-gray-50 rounded">
+                          <ul className="list-disc pl-5">
+                            <li>Retry attempts: {retryCount}</li>
+                            <li>Direct RPC access: {diagnosticInfo.directFetchSuccess ? 'Available' : 'Blocked'}</li>
+                            <li>Browser: {navigator.userAgent.split('/')[0]}</li>
+                            <li>Network: {navigator.onLine ? 'Online' : 'Offline'}</li>
+                            <li>Phantom connected: {window.solana?.isPhantom ? 'Yes' : 'No'}</li>
+                          </ul>
+                          
+                          {diagnosticInfo.lastError && (
+                            <div className="mt-1">
+                              <p className="font-semibold">Last error:</p>
+                              <div className="text-red-600 text-xs p-1 bg-gray-100 rounded overflow-x-auto">
+                                {diagnosticInfo.lastError}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

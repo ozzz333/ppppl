@@ -1416,7 +1416,7 @@ export default function ParlayBuilder() {
             </ul>
           </CardContent>
         </Card>
-      </div>
+      </div
     </div>
   );
 }

@@ -35,10 +35,10 @@ export default function ParlayBuilder() {
 
   // RPC Endpoints - using multiple options for reliability
   const RPC_ENDPOINTS = [
-    "https://solana-mainnet.g.alchemy.com/v2/demo", // Alchemy demo endpoint
-    "https://solana-api.projectserum.com",
-    "https://mainnet.helius-rpc.com/?api-key=15319103-2ae4-4a6e-9d78-eeeef3d6e158", // Helius public endpoint
-    "https://api.mainnet-beta.solana.com"
+    "https://ssc-dao.genesysgo.net", // GenesysGo
+    "https://solana-api.projectserum.com", // Project Serum
+    "https://solana.rpcpool.com", // RPC Pool
+    "https://api.mainnet-beta.solana.com" // Official endpoint (as last resort)
   ];
 
   // Select an RPC endpoint - we'll use the current index from our list
@@ -50,15 +50,23 @@ export default function ParlayBuilder() {
   const connection = useMemo(() => {
     console.log("Creating connection to:", rpcEndpoint);
     try {
-      return new web3.Connection(rpcEndpoint, {
+      const conn = new web3.Connection(rpcEndpoint, {
         commitment: 'confirmed',
         confirmTransactionInitialTimeout: 60000
       });
+      
+      // Verify the connection works on initial load
+      if (isTransacting) {
+        // If we're in the middle of a transaction, immediately signal that we've changed endpoints
+        setTransactionStatus(`Connected to RPC endpoint: ${rpcEndpoint}`);
+      }
+      
+      return conn;
     } catch (err) {
       console.error("Failed to create Solana connection:", err);
       return null;
     }
-  }, [rpcEndpoint]);
+  }, [rpcEndpoint, isTransacting]);
 
   const RANGE_WIDTHS = {
     BTC: {
@@ -153,40 +161,21 @@ export default function ParlayBuilder() {
     }
   };
 
-  // Try to connect to a different RPC endpoint if the current one fails
-  const tryAlternativeRpcEndpoint = async () => {
-    // Move to the next endpoint in the list, or go back to the first one if we're at the end
+  // Try to connect to a different RPC endpoint
+  const tryAlternativeRpcEndpoint = () => {
+    // Get next RPC endpoint index
     const nextIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
     const newEndpoint = RPC_ENDPOINTS[nextIndex];
     
-    // Create a new connection with the alternative endpoint
-    try {
-      console.log(`Switching from RPC ${currentRpcIndex} to ${nextIndex}: ${newEndpoint}`);
-      setTransactionStatus(`Switching to alternative RPC endpoint (${nextIndex + 1}/${RPC_ENDPOINTS.length})...`);
-      
-      const newConnection = new web3.Connection(newEndpoint, {
-        commitment: 'confirmed',
-        confirmTransactionInitialTimeout: 60000
-      });
-      
-      // Test the connection
-      await newConnection.getRecentBlockhash();
-      
-      // If successful, update the state
-      setCurrentRpcIndex(nextIndex);
-      return newConnection;
-    } catch (err) {
-      console.error(`Alternative RPC endpoint ${nextIndex} also failed:`, err);
-      
-      // If we've tried all endpoints and come back to the original one, give up
-      if ((nextIndex + 1) % RPC_ENDPOINTS.length === currentRpcIndex) {
-        console.error("All RPC endpoints failed");
-        return null;
-      }
-      
-      // Otherwise recursively try the next one
-      return tryAlternativeRpcEndpoint();
-    }
+    console.log(`Switching from RPC ${currentRpcIndex} to ${nextIndex}: ${newEndpoint}`);
+    setTransactionStatus(`Switching to alternative RPC endpoint (${nextIndex + 1}/${RPC_ENDPOINTS.length})...`);
+    
+    // Update the state with the new index - this will trigger the useMemo for rpcEndpoint
+    // and create a new connection
+    setCurrentRpcIndex(nextIndex);
+    
+    // Don't return anything - let the component re-render with the new RPC endpoint
+    return null;
   };
 
   // Auto-connect to wallet if already authorized
@@ -402,7 +391,7 @@ export default function ParlayBuilder() {
       });
       transaction.add(memoInstruction);
 
-      // Try to get recent blockhash, with failover to alternative RPC endpoints
+      // Try to get recent blockhash
       let blockhash;
       try {
         setTransactionStatus("Getting recent blockhash...");
@@ -413,19 +402,15 @@ export default function ParlayBuilder() {
         console.log("Using blockhash:", blockhash);
       } catch (err) {
         console.error("Failed to get recent blockhash:", err);
-        setTransactionStatus("Primary RPC endpoint failed. Trying alternative...");
+        setTransactionStatus("RPC endpoint failed. Trying next one...");
         
-        // Try alternative RPC endpoint
-        const alternativeConnection = await tryAlternativeRpcEndpoint();
-        if (!alternativeConnection) {
-          throw new Error("Failed to connect to any Solana RPC endpoint. Please try again later.");
-        }
+        // Try next RPC endpoint
+        tryAlternativeRpcEndpoint();
         
-        // Try again with the new connection
-        console.log("Fetching blockhash from alternative endpoint...");
-        const alternativeResult = await alternativeConnection.getRecentBlockhash();
-        blockhash = alternativeResult.blockhash;
-        console.log("Got alternative blockhash:", blockhash);
+        // Abort this attempt and let the user try again
+        setIsTransacting(false);
+        setError("Connection failed. Switched to new RPC endpoint. Please try again.");
+        return false;
       }
 
       transaction.recentBlockhash = blockhash;
@@ -434,9 +419,19 @@ export default function ParlayBuilder() {
       // Sign and send transaction
       setTransactionStatus("Awaiting wallet approval...");
       console.log("Requesting transaction signature...");
-      const signed = await window.solana.signTransaction(transaction);
-      console.log("Transaction signed:", signed);
       
+      let signed;
+      try {
+        signed = await window.solana.signTransaction(transaction);
+        console.log("Transaction signed:", signed);
+      } catch (signError) {
+        console.error("Error signing transaction:", signError);
+        setError("Transaction signing failed: " + signError.message);
+        setIsTransacting(false);
+        return false;
+      }
+      
+      // Send the transaction
       setTransactionStatus("Sending transaction to Solana...");
       let signature;
       try {
@@ -446,16 +441,13 @@ export default function ParlayBuilder() {
       } catch (sendError) {
         console.error("Error sending transaction:", sendError);
         
-        // Try alternative RPC endpoint
-        const alternativeConnection = await tryAlternativeRpcEndpoint();
-        if (!alternativeConnection) {
-          throw new Error("Failed to send transaction. Please try again later.");
-        }
+        // Try next RPC endpoint
+        tryAlternativeRpcEndpoint();
         
-        // Try again with the new connection
-        console.log("Trying to send with alternative connection...");
-        signature = await alternativeConnection.sendRawTransaction(signed.serialize());
-        console.log("Transaction sent via alternative! Signature:", signature);
+        // Abort this attempt and let the user try again
+        setIsTransacting(false);
+        setError("Failed to send transaction. Switched to new RPC endpoint. Please try again.");
+        return false;
       }
       
       // Wait for confirmation
@@ -468,33 +460,23 @@ export default function ParlayBuilder() {
       } catch (confirmError) {
         console.error("Error confirming transaction:", confirmError);
         
-        // Try alternative RPC endpoint
-        const alternativeConnection = await tryAlternativeRpcEndpoint();
-        if (!alternativeConnection) {
-          // Even if we can't confirm, the transaction might still be processing
-          const message = "Unable to confirm transaction, but it may still be processing. Transaction hash: " + signature;
-          console.log(message);
-          setTransactionStatus(message);
-          
-          // Add the bet to history anyway, but mark as pending
-          const ticket = {
-            legs,
-            betAmount,
-            timestamp: new Date().toISOString(),
-            signature,
-            status: 'pending'
-          };
-          
-          setHistory([ticket, ...history]);
-          setLegs([]);
-          setIsTransacting(false);
-          return true;
-        }
+        // We can consider the transaction potentially successful even if we can't confirm it
+        setTransactionStatus("Unable to confirm transaction status, but it was submitted successfully. Transaction hash: " + signature);
         
-        // Try again with the new connection
-        console.log("Confirming with alternative connection...");
-        confirmation = await alternativeConnection.confirmTransaction(signature, 'confirmed');
-        console.log("Got confirmation from alternative:", confirmation);
+        // Add the bet to history, but mark as pending
+        const ticket = {
+          legs,
+          betAmount,
+          timestamp: new Date().toISOString(),
+          signature,
+          status: 'pending',
+          explorerUrl: `https://explorer.solana.com/tx/${signature}`
+        };
+        
+        setHistory([ticket, ...history]);
+        setLegs([]);
+        setIsTransacting(false);
+        return true;
       }
       
       if (confirmation && confirmation.value && confirmation.value.err) {
@@ -673,14 +655,43 @@ export default function ParlayBuilder() {
                 
                 {/* Transaction Status Message */}
                 {transactionStatus && (
-                  <div className={`mt-2 p-2 rounded text-sm ${transactionStatus.includes("failed") ? "bg-red-100 text-red-700" : "bg-blue-100 text-blue-700"}`}>
+                  <div className={`mt-2 p-2 rounded text-sm ${
+                    transactionStatus.includes("failed") || transactionStatus.includes("Failed") 
+                      ? "bg-red-100 text-red-700" 
+                      : transactionStatus.includes("Confirmed") || transactionStatus.includes("confirmed")
+                        ? "bg-green-100 text-green-700"
+                        : "bg-blue-100 text-blue-700"
+                  }`}>
                     {transactionStatus}
                   </div>
                 )}
                 
+                {/* Error Message */}
+                {error && (
+                  <div className="mt-2 p-2 rounded text-sm bg-red-100 text-red-700">
+                    Error: {error}
+                    {error.includes("Switched to new RPC") && (
+                      <div className="mt-1">
+                        <Button 
+                          onClick={() => setError("")} 
+                          className="text-xs py-1 px-2"
+                        >
+                          Dismiss & Try Again
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
                 {/* Connection Status */}
-                <div className="mt-2 text-xs text-gray-500">
-                  RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})
+                <div className="mt-2 text-xs text-gray-500 flex justify-between">
+                  <span>RPC: {rpcEndpoint.split("?")[0]} ({currentRpcIndex + 1}/{RPC_ENDPOINTS.length})</span>
+                  <Button 
+                    className="text-xs py-0 px-2 bg-gray-200 text-gray-700 hover:bg-gray-300"
+                    onClick={tryAlternativeRpcEndpoint}
+                  >
+                    Try Next RPC
+                  </Button>
                 </div>
               </div>
             </CardContent>
